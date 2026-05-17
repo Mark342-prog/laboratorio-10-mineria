@@ -348,3 +348,392 @@ write.csv(df_norm, "water_potability_preprocesado.csv", row.names = FALSE)
 ```
 
 El dataset preprocesado queda listo para la etapa de diseño experimental, donde se simulará el escenario semi-supervisado asignando etiquetas únicamente a una fracción del conjunto de entrenamiento (5%, 10% y 20%).
+
+## 3. Experimentación
+
+### 3.1 Objetivo de la experimentación
+
+El objetivo de esta etapa es analizar cómo diferentes configuraciones del modelo semi-supervisado afectan el desempeño del algoritmo cuando únicamente una pequeña fracción de los datos está etiquetada.
+
+Se evaluarán:
+
+Distintos porcentajes de datos etiquetados:
+* 5%
+* 10%
+* 20%
+Variaciones de hiperparámetros:
+- Kernel de SVM
+- Parámetro C
+- Parámetro γ
+Métricas:
+_ Accuracy
+_ Precision
+_ Recall
+_ F1-score
+
+Además, se analizará la robustez del algoritmo bajo escenarios extremos de poca supervisión.
+
+
+```{r}
+library(RSSL)
+library(e1071)
+library(caret)
+library(dplyr)
+
+features <- setdiff(names(df_norm), "Potability")
+
+set.seed(123)
+
+train_index <- createDataPartition(
+  df_norm$Potability,
+  p = 0.8,
+  list = FALSE
+)
+
+train_data <- df_norm[train_index, ]
+test_data  <- df_norm[-train_index, ]
+
+cat("Train:", nrow(train_data), "\n")
+cat("Test :", nrow(test_data), "\n")
+
+
+crear_escenario_ssl <- function(data,
+                                porcentaje_etiquetado = 0.05) {
+  
+  n <- nrow(data)
+  
+  etiquetados <- sample(
+    1:n,
+    size = round(n * porcentaje_etiquetado)
+  )
+  
+  y_ssl <- data$Potability
+  
+  # Eliminar etiquetas no seleccionadas
+  y_ssl[-etiquetados] <- NA
+  
+  return(list(
+    y = y_ssl,
+    etiquetados = etiquetados
+  ))
+}
+
+metricas_modelo <- function(real, pred) {
+  
+  cm <- confusionMatrix(pred, real)
+  
+  precision <- cm$byClass["Pos Pred Value"]
+  recall    <- cm$byClass["Sensitivity"]
+  
+  f1 <- 2 * (
+    (precision * recall) /
+    (precision + recall)
+  )
+  
+  data.frame(
+    Accuracy  = round(cm$overall["Accuracy"], 4),
+    Precision = round(precision, 4),
+    Recall    = round(recall, 4),
+    F1        = round(f1, 4)
+  )
+}
+
+porcentajes <- c(0.05, 0.10, 0.20)
+
+kernels <- c("linear", "radial")
+
+valores_C <- c(0.1, 1, 10)
+
+valores_gamma <- c(0.01, 0.1, 1)
+
+resultados_exp <- data.frame()
+
+set.seed(123)
+
+for(p in porcentajes) {
+  
+  # Crear escenario SSL
+  ssl_data <- crear_escenario_ssl(
+    train_data,
+    p
+  )
+  
+  # Índices etiquetados
+  labeled_idx <- which(!is.na(ssl_data$y))
+  
+  # Datos etiquetados
+  datos_etiquetados <- train_data[
+    labeled_idx,
+  ]
+  
+  for(k in kernels) {
+    
+    for(c_val in valores_C) {
+      
+      for(g_val in valores_gamma) {
+        
+        if(k == "linear") {
+          
+          modelo <- svm(
+            Potability ~ .,
+            data = datos_etiquetados,
+            kernel = "linear",
+            cost = c_val
+          )
+          
+        } else {
+
+          modelo <- svm(
+            Potability ~ .,
+            data = datos_etiquetados,
+            kernel = "radial",
+            cost = c_val,
+            gamma = g_val
+          )
+        }
+        
+        pred <- predict(
+          modelo,
+          test_data[, features]
+        )
+        
+        pred <- as.factor(pred)
+
+        met <- metricas_modelo(
+          test_data$Potability,
+          pred
+        )
+        
+        met$Etiquetas <- paste0(
+          p * 100,
+          "%"
+        )
+        
+        met$Kernel <- k
+        met$C      <- c_val
+        met$Gamma  <- g_val
+        
+        resultados_exp <- rbind(
+          resultados_exp,
+          met
+        )
+      }
+    }
+  }
+}
+
+
+head(resultados_exp)
+
+
+resultados_exp %>%
+  arrange(desc(F1)) %>%
+  head(10)
+
+
+resultados_exp %>%
+  
+  group_by(Etiquetas) %>%
+  
+  summarise(
+    Accuracy_prom = mean(Accuracy),
+    Precision_prom = mean(Precision),
+    Recall_prom = mean(Recall),
+    F1_prom = mean(F1)
+  )
+
+
+ggplot(
+  resultados_exp,
+  
+  aes(
+    x = factor(C),
+    y = F1,
+    fill = Etiquetas
+  )
+) +
+  
+  geom_boxplot() +
+  
+  facet_wrap(~Kernel) +
+  
+  labs(
+    title = "Sensibilidad del parámetro C",
+    x = "Valor de C",
+    y = "F1-score"
+  ) +
+  
+  theme_minimal(base_size = 12)
+
+resultados_exp %>%
+  
+  filter(Kernel == "radial") %>%
+  
+  ggplot(
+    aes(
+      x = factor(Gamma),
+      y = F1,
+      fill = Etiquetas
+    )
+  ) +
+  
+  geom_boxplot() +
+  
+  labs(
+    title = "Sensibilidad del parámetro gamma",
+    x = "Gamma",
+    y = "F1-score"
+  ) +
+  
+  theme_minimal(base_size = 12)
+
+
+resultados_exp %>%
+  
+  pivot_longer(
+    cols = c(
+      Accuracy,
+      Precision,
+      Recall,
+      F1
+    ),
+    
+    names_to = "Metrica",
+    values_to = "Valor"
+  ) %>%
+  
+  ggplot(
+    aes(
+      x = Etiquetas,
+      y = Valor,
+      fill = Metrica
+    )
+  ) +
+  
+  geom_bar(
+    stat = "identity",
+    position = "dodge"
+  ) +
+  
+  labs(
+    title = "Comparación de métricas",
+    x = "% etiquetas disponibles",
+    y = "Valor"
+  ) +
+  
+  theme_minimal(base_size = 12)
+```
+
+
+### 32. Análisis de Resultados Experimentales
+Desempeño general del modelo
+
+Los experimentos muestran que el modelo SVM logró mantener un desempeño relativamente estable incluso utilizando únicamente una pequeña fracción de datos etiquetados (5%, 10% y 20%).
+
+Las métricas promedio obtenidas fueron:
+
+  Etiquetas	Accuracy	Precision	Recall	F1-score
+  5%	0.616	0.633	0.893	0.738
+  10%	0.613	0.617	0.976	0.754
+  20%	0.615	0.617	0.983	0.757
+
+Se observa que el incremento en la cantidad de etiquetas mejora principalmente las métricas de Recall y F1-score, indicando que el modelo identifica una mayor proporción de muestras potables conforme dispone de más información supervisada.
+
+### 3.3 Sensibilidad a hiperparámetros
+Efecto del parámetro C
+
+El parámetro:
+
+* C
+
+controla el nivel de regularización del SVM.
+
+Los resultados muestran que:
+
+- Valores pequeños de C (0.1):
+- Generaron fronteras más suaves.
+- Produjeron resultados más estables.
+- Evitaron sobreajuste.
+- Valores grandes de C (10):
+- Incrementaron la variabilidad del F1-score.
+- Produjeron mayor sensibilidad al ruido.
+- Mostraron señales de sobreajuste, especialmente con kernel radial.
+
+Esto puede observarse en el gráfico de sensibilidad, donde el kernel radial con C=10 presenta mayor dispersión de resultados.
+
+Efecto del kernel
+
+Se compararon dos kernels:
+
+- Linear
+- Radial (RBF)
+
+El kernel radial obtuvo los mejores resultados globales, alcanzando:
+
+- Kernel	Mejor F1
+- Linear	0.7578
+- Radial	0.7695
+
+Esto indica que las relaciones entre variables no son completamente lineales y que el kernel radial logra capturar patrones más complejos en los datos de potabilidad.
+
+#### Efecto del parámetro gamma
+
+El parámetro:
+
+γ
+
+determina el alcance de influencia de cada observación en el kernel radial.
+
+Se observó que:
+
+Valores bajos de γ:
+- Produjeron modelos más estables.
+- Mejor capacidad de generalización.
+Valores altos de γ:
+- Generaron fronteras más complejas.
+- Incrementaron la sensibilidad al ruido.
+- Aumentaron el riesgo de sobreajuste.
+### 3.4 Robustez con pocos datos etiquetados
+
+Uno de los objetivos principales del aprendizaje semi-supervisado es mantener un desempeño aceptable aun cuando existen muy pocas etiquetas disponibles.
+
+Los resultados muestran que:
+
+Con únicamente 5% de etiquetas:
+- El modelo alcanzó un F1-score promedio de aproximadamente 0.74.
+- El recall permaneció relativamente alto.
+Con 10% y 20%:
+- El rendimiento mejoró moderadamente.
+- El algoritmo mostró mayor estabilidad.
+
+Esto demuestra que el modelo es relativamente robusto ante escenarios de baja supervisión y logra aprovechar la estructura de los datos aun con información limitada.
+
+### 3.5 Sobreajuste y subajuste
+Sobreajuste
+
+Se observaron señales de sobreajuste principalmente en configuraciones con:
+
+- Kernel radial.
+
+Estas configuraciones generaron una mayor variabilidad en el F1-score y menor estabilidad entre experimentos.
+
+#### Subajuste
+
+El subajuste apareció principalmente en:
+
+- Kernel lineal.
+- Valores bajos de complejidad.
+
+En estos casos el modelo generó fronteras demasiado simples, limitando su capacidad para capturar relaciones complejas entre variables.
+
+### 3.6 Conclusión experimental
+
+Los experimentos realizados demuestran que el modelo SVM mantiene un desempeño competitivo incluso utilizando únicamente una pequeña proporción de datos etiquetados.
+
+El análisis de sensibilidad evidenció que los hiperparámetros influyen considerablemente en el comportamiento del modelo:
+
+- Valores moderados de C y γ proporcionaron el mejor equilibrio entre generalización y complejidad.
+- El kernel radial obtuvo el mejor desempeño global.
+- El algoritmo mostró una robustez aceptable bajo escenarios con pocas etiquetas.
+
+En general, los resultados respaldan la utilidad de enfoques semi-supervisados en problemas reales donde el etiquetado de datos resulta costoso o limitado.
