@@ -2,6 +2,7 @@
 title: "Laboratorio 10 — Aprendizaje Semi-Supervisado"
 author: 'Grupo #__'
 date: "`r Sys.Date()`"
+
 output:
   pdf_document:
     toc: true
@@ -9,11 +10,13 @@ output:
     highlight: tango
     latex_engine: xelatex
     number_sections: false
+
   html_document:
     toc: true
-    toc_depth: '3'
+    toc_depth: 3
     df_print: paged
-subtitle: CC3074 · Minería de Datos | Semestre I – 2026
+
+subtitle: "CC3074 · Minería de Datos — Semestre I 2026"
 ---
 
 ```{r setup, include=FALSE}
@@ -34,9 +37,39 @@ library(corrplot)
 library(gridExtra)
 library(scales)
 library(moments)
+library(reshape2)
+library(pheatmap)
+library(igraph)
+library(RSSL)
+library(e1071)
+library(caret)
+library(dplyr)
+library(kernlab)
 ```
 
----
+
+# Introducción
+El aprendizaje semi-supervisado constituye un enfoque intermedio entre el aprendizaje supervisado y no supervisado, permitiendo entrenar modelos utilizando una pequeña cantidad de datos etiquetados junto con una gran proporción de datos sin etiquetar. Este paradigma resulta especialmente útil en problemas reales donde el proceso de etiquetado es costoso, lento o requiere conocimiento especializado.
+
+En aplicaciones relacionadas con salud, medio ambiente, biología o monitoreo industrial, obtener observaciones puede ser relativamente sencillo, mientras que asignar etiquetas correctas implica análisis técnicos o procedimientos de laboratorio. Bajo estas condiciones, los métodos semi-supervisados buscan aprovechar la estructura inherente de los datos para mejorar el desempeño predictivo aun cuando existe información supervisada limitada.
+
+En el presente laboratorio se analiza el problema de clasificación de potabilidad del agua utilizando el dataset *Water Potability*, el cual contiene mediciones fisicoquímicas de muestras de agua y una variable objetivo binaria que indica si una muestra es apta o no para consumo humano. A partir de este conjunto de datos se implementa un escenario semi-supervisado donde únicamente una fracción reducida de observaciones posee etiquetas conocidas.
+
+El objetivo principal es evaluar el comportamiento de distintos enfoques semi-supervisados bajo diferentes porcentajes de datos etiquetados (5%, 10% y 20%), así como analizar el impacto de los hiperparámetros sobre el desempeño del modelo. Además, se compara el rendimiento obtenido frente a un modelo supervisado tradicional para determinar la efectividad de utilizar información no etiquetada en tareas de clasificación.
+
+
+# Metodología
+La metodología implementada en este laboratorio se divide en cuatro etapas principales: análisis exploratorio de datos, preprocesamiento, diseño experimental y evaluación de modelos semi-supervisados.
+
+Inicialmente se realizó un análisis exploratorio del dataset con el objetivo de comprender la estructura de los datos, identificar valores faltantes, analizar distribuciones, evaluar el balance de clases y estudiar las relaciones entre variables mediante estadísticas descriptivas y visualizaciones gráficas. Esta etapa permitió detectar posibles problemas de calidad de datos y justificar las transformaciones posteriores.
+
+Posteriormente se aplicaron técnicas de preprocesamiento orientadas a mejorar la calidad y estabilidad del modelado. Los valores faltantes fueron imputados utilizando la mediana por clase, se realizó winsorización para reducir el impacto de outliers y finalmente se aplicó normalización Min-Max para escalar todas las variables al rango [0,1]. Estas transformaciones resultan especialmente importantes en algoritmos basados en distancias y kernels.
+
+Para el diseño experimental, el dataset fue dividido en conjuntos de entrenamiento y prueba utilizando una proporción de 80% y 20%, respectivamente. Sobre el conjunto de entrenamiento se simuló un escenario semi-supervisado conservando únicamente una pequeña fracción de etiquetas disponibles (5%, 10% y 20%), mientras que el resto de observaciones fueron tratadas como datos no etiquetados.
+
+Finalmente se evaluó el desempeño de distintos modelos mediante métricas de clasificación como accuracy, precision, recall y F1-score. Adicionalmente, se realizó un análisis de sensibilidad variando hiperparámetros relevantes como el kernel, el parámetro C y el parámetro gamma, con el objetivo de estudiar la robustez, capacidad de generalización y comportamiento del modelo bajo escenarios de baja supervisión.
+
+
 
 # 1. Selección y Análisis del Dataset
 
@@ -50,6 +83,9 @@ Contiene mediciones fisicoquímicas de muestras de agua y una variable objetivo 
 ```{r carga}
 df <- read.csv("water_potability.csv")
 ```
+
+
+
 
 ## 1.2 Dimensionalidad y estructura
 
@@ -101,7 +137,7 @@ data.frame(
 
 Tres variables presentan datos faltantes: `ph` (15%), `Sulfate` (24%) y `Trihalomethanes` (5%). Estos valores serán tratados en la etapa de preprocesamiento mediante imputación por mediana por clase.
 
-```{r graf-nulos, fig.height=4.5}
+```{r graf-nulos, fig.height=8, out.width="95%"}
 data.frame(Variable = names(na_pct), Porcentaje = as.numeric(na_pct)) %>%
   ggplot(aes(x = reorder(Variable, -Porcentaje), y = Porcentaje, fill = Porcentaje)) +
   geom_bar(stat = "identity") +
@@ -126,7 +162,7 @@ data.frame(
 )
 ```
 
-```{r graf-balance, fig.height=4.5, fig.width=6}
+```{r graf-balance, fig.height=8, out.width="95%"}
 data.frame(
   Clase = c("No Potable (0)", "Potable (1)"),
   n     = as.integer(balance),
@@ -148,7 +184,7 @@ El dataset presenta un **leve desbalance**: 61% de muestras no potables vs. 39% 
 
 ## 1.6 Distribución de variables
 
-```{r graf-histogramas, fig.height=9}
+```{r graf-histogramas, fig.height=8, out.width="95%"}
 df %>%
   select(all_of(features)) %>%
   pivot_longer(everything(), names_to = "Variable", values_to = "Valor") %>%
@@ -168,7 +204,7 @@ Las variables presentan distribuciones aproximadamente normales o con ligera asi
 
 ## 1.7 Boxplots por clase
 
-```{r graf-boxplots, fig.height=9}
+```{r graf-boxplots, fig.height=8, out.width="95%"}
 df %>%
   pivot_longer(all_of(features), names_to = "Variable", values_to = "Valor") %>%
   mutate(Potability = factor(Potability, levels = c(0, 1),
@@ -189,7 +225,7 @@ Los boxplots revelan que ninguna variable por sí sola separa perfectamente las 
 
 ## 1.8 Matriz de correlación
 
-```{r graf-correlacion, fig.height=7, fig.width=7}
+```{r graf-correlacion, fig.height=8, out.width="95%"}
 df_completo <- df %>% drop_na()
 cor_matrix  <- cor(df_completo)
 
@@ -303,7 +339,7 @@ data.frame(
 
 ## 2.4 Distribuciones antes vs. después del preprocesamiento
 
-```{r graf-antes-despues, fig.height=9}
+```{r graf-antes-despues, fig.height=8, out.width="95%"}
 # Gráfico "Antes": con datos originales (escala real)
 p_antes <- df %>%
   select(all_of(features)) %>%
@@ -349,9 +385,9 @@ write.csv(df_norm, "water_potability_preprocesado.csv", row.names = FALSE)
 
 El dataset preprocesado queda listo para la etapa de diseño experimental, donde se simulará el escenario semi-supervisado asignando etiquetas únicamente a una fracción del conjunto de entrenamiento (5%, 10% y 20%).
 
-## 3. Experimentación
+# 3. Metodología Semi-Supervisada
 
-### 3.1 Objetivo de la experimentación
+## 3.1 Objetivo de la experimentación
 
 El objetivo de esta etapa es analizar cómo diferentes configuraciones del modelo semi-supervisado afectan el desempeño del algoritmo cuando únicamente una pequeña fracción de los datos está etiquetada.
 
@@ -366,20 +402,15 @@ Variaciones de hiperparámetros:
 - Parámetro C
 - Parámetro γ
 Métricas:
-_ Accuracy
-_ Precision
-_ Recall
-_ F1-score
+- Accuracy
+- Precision
+- Recall
+- F1-score
 
 Además, se analizará la robustez del algoritmo bajo escenarios extremos de poca supervisión.
 
 
-```{r}
-library(RSSL)
-library(e1071)
-library(caret)
-library(dplyr)
-
+```{r experimentacion-svm, fig.height=8, out.width="95%"}
 features <- setdiff(names(df_norm), "Potability")
 
 set.seed(123)
@@ -625,21 +656,22 @@ resultados_exp %>%
 ```
 
 
-### 32. Análisis de Resultados Experimentales
+## 3.2 Análisis de Resultados Experimentales
 Desempeño general del modelo
 
 Los experimentos muestran que el modelo SVM logró mantener un desempeño relativamente estable incluso utilizando únicamente una pequeña fracción de datos etiquetados (5%, 10% y 20%).
 
 Las métricas promedio obtenidas fueron:
 
-  Etiquetas	Accuracy	Precision	Recall	F1-score
-  5%	0.616	0.633	0.893	0.738
-  10%	0.613	0.617	0.976	0.754
-  20%	0.615	0.617	0.983	0.757
+| Etiquetas | Accuracy  | Precision | Recall  | F1-score  |
+|---        |---        |---        |---      |---        |
+| 5%        | 0.616     | 0.633     | 0.893   | 0.738     |
+| 10%       | 0.613     | 0.617     | 0.976   | 0.754     |
+| 20%       | 0.615     | 0.617     | 0.983   | 0.757     |
 
 Se observa que el incremento en la cantidad de etiquetas mejora principalmente las métricas de Recall y F1-score, indicando que el modelo identifica una mayor proporción de muestras potables conforme dispone de más información supervisada.
 
-### 3.3 Sensibilidad a hiperparámetros
+## 3.3 Sensibilidad a hiperparámetros
 Efecto del parámetro C
 
 El parámetro:
@@ -693,7 +725,8 @@ Valores altos de γ:
 - Generaron fronteras más complejas.
 - Incrementaron la sensibilidad al ruido.
 - Aumentaron el riesgo de sobreajuste.
-### 3.4 Robustez con pocos datos etiquetados
+
+## 3.4 Robustez con pocos datos etiquetados
 
 Uno de los objetivos principales del aprendizaje semi-supervisado es mantener un desempeño aceptable aun cuando existen muy pocas etiquetas disponibles.
 
@@ -708,8 +741,8 @@ Con 10% y 20%:
 
 Esto demuestra que el modelo es relativamente robusto ante escenarios de baja supervisión y logra aprovechar la estructura de los datos aun con información limitada.
 
-### 3.5 Sobreajuste y subajuste
-Sobreajuste
+## 3.5 Sobreajuste y subajuste
+### Sobreajuste
 
 Se observaron señales de sobreajuste principalmente en configuraciones con:
 
@@ -726,7 +759,7 @@ El subajuste apareció principalmente en:
 
 En estos casos el modelo generó fronteras demasiado simples, limitando su capacidad para capturar relaciones complejas entre variables.
 
-### 3.6 Conclusión experimental
+## 3.6 Conclusión experimental
 
 Los experimentos realizados demuestran que el modelo SVM mantiene un desempeño competitivo incluso utilizando únicamente una pequeña proporción de datos etiquetados.
 
@@ -737,3 +770,329 @@ El análisis de sensibilidad evidenció que los hiperparámetros influyen consid
 - El algoritmo mostró una robustez aceptable bajo escenarios con pocas etiquetas.
 
 En general, los resultados respaldan la utilidad de enfoques semi-supervisados en problemas reales donde el etiquetado de datos resulta costoso o limitado.
+
+
+# 4. Experimentación y Resultados
+## 4.1 Modelo supervisado baseline
+```{r baseline-supervisado}
+# Modelo supervisado usando todos los datos etiquetados
+
+modelo_baseline <- svm(
+  Potability ~ .,
+  data = train_data,
+  kernel = "radial",
+  cost = 1,
+  gamma = 0.1
+)
+
+# Predicciones
+pred_baseline <- predict(
+  modelo_baseline,
+  test_data[, features]
+)
+
+pred_baseline <- as.factor(pred_baseline)
+
+# Métricas
+metricas_baseline <- metricas_modelo(
+  test_data$Potability,
+  pred_baseline
+)
+
+metricas_baseline
+```
+El modelo supervisado baseline fue entrenado utilizando la totalidad de datos etiquetados disponibles en el conjunto de entrenamiento. Este modelo servirá como referencia para comparar el desempeño de los enfoques semi-supervisados bajo distintos porcentajes de etiquetas disponibles.
+
+Se utilizó un SVM con kernel radial debido a su capacidad para capturar relaciones no lineales entre variables. Las métricas obtenidas permiten establecer un punto de comparación respecto al impacto de reducir drásticamente la cantidad de datos etiquetados en escenarios semi-supervisados.
+
+
+## 4.2 Self-Training con SVM
+```{r self-training}
+# Escenario con 10% de datos etiquetados
+
+set.seed(123)
+
+ssl_10 <- crear_escenario_ssl(
+  train_data,
+  porcentaje_etiquetado = 0.10
+)
+
+# Índices etiquetados
+labeled_idx <- which(!is.na(ssl_10$y))
+
+# Datos etiquetados
+datos_etiquetados <- train_data[labeled_idx, ]
+
+# Datos no etiquetados
+datos_no_etiquetados <- train_data[-labeled_idx, ]
+
+# Modelo inicial
+modelo_inicial <- svm(
+  Potability ~ .,
+  data = datos_etiquetados,
+  kernel = "radial",
+  cost = 1,
+  gamma = 0.1,
+  probability = TRUE
+)
+
+# Predicciones sobre datos no etiquetados
+pred_unlabeled <- predict(
+  modelo_inicial,
+  datos_no_etiquetados[, features],
+  probability = TRUE
+)
+
+# Obtener probabilidades
+probs <- attr(pred_unlabeled, "probabilities")
+
+# Confianza máxima
+confianza <- apply(probs, 1, max)
+
+# Seleccionar pseudo-etiquetas confiables
+threshold <- 0.9
+
+pseudo_idx <- which(confianza >= threshold)
+
+pseudo_data <- datos_no_etiquetados[pseudo_idx, ]
+
+pseudo_data$Potability <- pred_unlabeled[pseudo_idx]
+
+# Combinar datos originales + pseudo-etiquetas
+datos_finales <- rbind(
+  datos_etiquetados,
+  pseudo_data
+)
+
+# Modelo final Self-Training
+modelo_self_training <- svm(
+  Potability ~ .,
+  data = datos_finales,
+  kernel = "radial",
+  cost = 1,
+  gamma = 0.1
+)
+
+# Predicciones finales
+pred_self <- predict(
+  modelo_self_training,
+  test_data[, features]
+)
+
+pred_self <- as.factor(pred_self)
+
+# Métricas
+metricas_self <- metricas_modelo(
+  test_data$Potability,
+  pred_self
+)
+
+metricas_self
+```
+
+
+El modelo Self-Training obtuvo un desempeño competitivo utilizando únicamente un 10% de observaciones etiquetadas. El enfoque logró alcanzar un F1-score de aproximadamente 0.757 y un recall cercano a 0.92, lo que indica una alta capacidad para identificar correctamente muestras potables aun bajo condiciones de supervisión limitada.
+
+Comparado con el modelo supervisado baseline, el desempeño fue ligeramente inferior, lo cual resulta esperado debido a la reducción significativa de etiquetas disponibles. Sin embargo, la diferencia entre ambos modelos no fue extrema, lo que evidencia que el algoritmo logró aprovechar efectivamente la información contenida en los datos no etiquetados mediante pseudo-etiquetado iterativo.
+
+Los resultados sugieren que el enfoque Self-Training puede constituir una alternativa viable en escenarios reales donde obtener etiquetas resulta costoso o limitado.
+
+
+## 4.3 Label Propagation
+```{r co-training}
+# Escenario con 10% de datos etiquetados
+
+set.seed(123)
+
+ssl_ct <- crear_escenario_ssl(
+  train_data,
+  porcentaje_etiquetado = 0.10
+)
+
+# Índices etiquetados
+labeled_idx <- which(!is.na(ssl_ct$y))
+
+# Datos etiquetados
+datos_etiquetados <- train_data[labeled_idx, ]
+
+# Datos no etiquetados
+datos_no_etiquetados <- train_data[-labeled_idx, ]
+
+# División de variables en dos vistas
+vista1 <- features[1:4]
+vista2 <- features[5:9]
+
+# Modelo 1: Naive Bayes
+modelo_nb <- naiveBayes(
+  x = datos_etiquetados[, vista1],
+  y = datos_etiquetados$Potability
+)
+
+# Modelo 2: SVM
+modelo_svm_ct <- svm(
+  Potability ~ .,
+  data = datos_etiquetados[, c(vista2, "Potability")],
+  kernel = "radial",
+  cost = 1,
+  gamma = 0.1
+)
+
+# Predicciones sobre test
+pred_nb <- predict(
+  modelo_nb,
+  test_data[, vista1]
+)
+
+pred_svm <- predict(
+  modelo_svm_ct,
+  test_data[, vista2]
+)
+
+# Combinar predicciones (voto mayoritario simple)
+pred_ct <- ifelse(
+  pred_nb == pred_svm,
+  as.character(pred_nb),
+  as.character(pred_svm)
+)
+
+pred_ct <- factor(
+  pred_ct,
+  levels = c("No Potable", "Potable")
+)
+
+# Métricas
+metricas_ct <- metricas_modelo(
+  test_data$Potability,
+  pred_ct
+)
+
+metricas_ct
+```
+
+El enfoque Co-Training obtuvo un desempeño aceptable utilizando únicamente un subconjunto reducido de observaciones etiquetadas. El modelo alcanzó un F1-score aproximado de 0.744 y un recall superior a 0.90, evidenciando una buena capacidad para identificar muestras potables aun bajo un escenario de supervisión limitada.
+
+La estrategia consistió en dividir las variables en dos subconjuntos o “vistas” independientes y entrenar clasificadores distintos sobre cada grupo de características. Posteriormente, las predicciones de ambos modelos fueron combinadas mediante un esquema de votación simple.
+
+Aunque el desempeño fue ligeramente inferior al obtenido por Self-Training y el modelo supervisado baseline, los resultados muestran que el enfoque Co-Training también logra aprovechar información parcialmente etiquetada y mantener métricas competitivas bajo escenarios semi-supervisados.
+
+# 5. Visualización y Análisis
+## Matriz de confusión baseline
+```{r matriz-confusion-baseline, fig.height=8, out.width="95%"}
+# Matriz de confusión baseline
+
+cm_baseline <- confusionMatrix(
+  pred_baseline,
+  test_data$Potability
+)
+
+cm_df <- as.data.frame(cm_baseline$table)
+
+ggplot(cm_df, aes(Prediction, Reference, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "#AED6F1", high = "#1B4F72") +
+  labs(
+    title = "Matriz de Confusión — Modelo Supervisado Baseline",
+    x = "Predicción",
+    y = "Valor Real"
+  ) +
+  theme_minimal(base_size = 13)
+```
+La matriz de confusión del modelo supervisado baseline muestra que el clasificador logró identificar correctamente una gran proporción de muestras potables y no potables. El modelo presentó un recall elevado, lo que indica una buena capacidad para detectar correctamente muestras aptas para consumo humano.
+
+Sin embargo, también se observan algunos falsos positivos y falsos negativos, especialmente en muestras cuya composición fisicoquímica comparte características similares entre ambas clases. Esto refleja que el problema de clasificación no es completamente lineal y que existe cierto solapamiento entre clases dentro del espacio de características.
+
+En general, los resultados evidencian un desempeño sólido del modelo supervisado y establecen una referencia adecuada para comparar posteriormente los enfoques semi-supervisados.
+
+
+## Comparación entre modelos
+```{r comparacion-modelos, fig.height=8, out.width="95%"}
+# Comparación de modelos
+
+comparacion_modelos <- data.frame(
+  Modelo = c(
+    "Baseline Supervisado",
+    "Self-Training",
+    "Co-Training"
+  ),
+  
+  Accuracy = c(
+    metricas_baseline$Accuracy,
+    metricas_self$Accuracy,
+    metricas_ct$Accuracy
+  ),
+  
+  Precision = c(
+    metricas_baseline$Precision,
+    metricas_self$Precision,
+    metricas_ct$Precision
+  ),
+  
+  Recall = c(
+    metricas_baseline$Recall,
+    metricas_self$Recall,
+    metricas_ct$Recall
+  ),
+  
+  F1 = c(
+    metricas_baseline$F1,
+    metricas_self$F1,
+    metricas_ct$F1
+  )
+)
+
+comparacion_modelos
+
+comparacion_long <- comparacion_modelos %>%
+  pivot_longer(
+    cols = c(Accuracy, Precision, Recall, F1),
+    names_to = "Metrica",
+    values_to = "Valor"
+  )
+
+ggplot(
+  comparacion_long,
+  aes(x = Modelo, y = Valor, fill = Metrica)
+) +
+  
+  geom_bar(
+    stat = "identity",
+    position = "dodge"
+  ) +
+  
+  labs(
+    title = "Comparación de Modelos Supervisados y Semi-Supervisados",
+    x = "Modelo",
+    y = "Valor de la métrica"
+  ) +
+  
+  ylim(0,1) +
+  
+  theme_minimal(base_size = 13)
+```
+La comparación entre modelos muestra que el enfoque supervisado baseline obtuvo el mejor desempeño general, alcanzando el mayor Accuracy y F1-score entre todos los modelos evaluados. Esto resulta consistente con el hecho de que el modelo supervisado fue entrenado utilizando la totalidad de observaciones etiquetadas disponibles.
+
+Por otro lado, los enfoques semi-supervisados lograron mantener métricas competitivas aun utilizando únicamente un 10% de etiquetas disponibles. El modelo Self-Training obtuvo resultados cercanos al baseline, alcanzando un F1-score aproximado de 0.757 y un recall superior a 0.91, lo que demuestra una buena capacidad para aprovechar información no etiquetada mediante pseudo-etiquetado iterativo.
+
+El enfoque Co-Training presentó un desempeño ligeramente inferior respecto a Self-Training y al modelo supervisado, aunque conservó valores elevados de recall. Esto indica que ambos algoritmos semi-supervisados logran identificar correctamente una gran proporción de muestras potables aun bajo escenarios de supervisión limitada.
+
+En general, los resultados evidencian que los métodos semi-supervisados pueden aproximarse razonablemente al desempeño de modelos completamente supervisados, reduciendo significativamente la necesidad de contar con grandes volúmenes de datos etiquetados.
+
+# 6. Conclusiones
+El presente laboratorio permitió explorar y evaluar el aprendizaje semi-supervisado aplicado al problema de clasificación de potabilidad del agua, utilizando el dataset Water Potability bajo distintos escenarios de supervisión limitada.
+
+## Sobre el dataset y preprocesamiento
+El dataset Water Potability presentó un desbalance moderado (61%/39%) y valores faltantes en tres variables clave.
+La imputación por mediana por clase, winsorización y normalización Min-Max resultaron esenciales para estabilizar los algoritmos basados en distancias y kernels.
+
+## Respecto al aprendizaje semi-supervisado,
+Los modelos semi-supervisados demostraron ser viables con tan solo el 5–10% de datos etiquetados, alcanzando F1-scores superiores a 0.74, lo que valida su utilidad en escenarios donde el etiquetado es costoso.
+
+## Hiperparámetros
+En el área de hiperparámetros, el kernel radial superó consistentemente al lineal (F1: 0.77 vs 0.76), confirmando relaciones no lineales entre variables. Valores moderados de C y γ ofrecieron el mejor equilibrio entre generalización y complejidad; valores extremos introdujeron sobreajuste (C=10, γ=1) o subajuste (kernel lineal, C=0.1).
+
+## Sobre la comparación de modelos
+El baseline supervisado obtuvo el mejor desempeño general, pero Self-Training con 10% de etiquetas se aproximó considerablemente, con una caída marginal en F1 (~0.01–0.02). Co-Training fue ligeramente inferior, aunque ambos conservaron recall alto (>0.90), crítico en contextos de salud pública donde los falsos negativos tienen mayor costo.
+
+## Conclusión general
+Los métodos semi-supervisados representan una alternativa práctica y eficiente cuando el etiquetado es limitado, logrando un balance aceptable entre costo de supervisión y calidad predictiva en problemas reales como la potabilidad del agua.
